@@ -46,7 +46,7 @@ export function CodeEditor({
           glyphMargin: false,
           folding: true,
           lineDecorationsWidth: 10,
-          lineNumbersMinChars: 3,
+          lineNumbersMinChars: 4,
           cursorBlinking: 'smooth',
           cursorSmoothCaretAnimation: 'on',
           smoothScrolling: true,

@@ -1,4 +1,5 @@
 import { ThemeProvider } from '@/components/ThemeProvider';
+import { Analytics } from '@vercel/analytics/next';
 import type { Metadata } from 'next';
 import { Geist, Geist_Mono } from 'next/font/google';
 import './globals.css';
@@ -36,6 +37,8 @@ export default function RootLayout({
             <div className="flex-grow flex flex-col">{children}</div>
           </div>
         </ThemeProvider>
+
+        <Analytics />
       </body>
     </html>
   );

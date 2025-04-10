@@ -1,4 +1,5 @@
 import { cn } from '@/lib/utils';
+import { Video } from './Video';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { Card } from './ui/card';
@@ -84,4 +85,5 @@ export const mdxComponents = {
   Badge,
   Card,
   Button,
+  Video,
 };

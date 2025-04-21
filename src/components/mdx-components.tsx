@@ -11,6 +11,8 @@ import { Card } from './ui/card';
 export const rehypePrettyCodeOptions: Partial<Options> = {
   theme: 'github-dark',
   keepBackground: true,
+  // Disable language badge
+  filterMetaString: (meta) => meta.replace(/language-\w+/, ''),
   // Callback to get the highlighted code as an HTML string
   onVisitLine(node) {
     // Prevent lines from collapsing in `display: grid` mode

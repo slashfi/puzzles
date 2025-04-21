@@ -267,20 +267,9 @@ h3 {
   padding: 0 0.5rem;
 }
 
-/* Language badge */
+/* Language badge - hidden by default */
 .prose pre[data-language]::before {
-  content: attr(data-language);
-  display: inline-block;
-  position: absolute;
-  top: 0.5rem;
-  right: 1rem;
-  font-size: 0.7rem;
-  font-weight: 600;
-  color: #e6e6e6;
-  background: rgba(0, 0, 0, 0.4);
-  padding: 0.1rem 0.5rem;
-  border-radius: 0.25rem;
-  text-transform: uppercase;
+  display: none; /* Hide the language badge */
 }
 
 .dark {

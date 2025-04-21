@@ -1,6 +1,37 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { mdxComponents, mdxOptions } from '@/components/mdx-components';
 import { compileMDX } from 'next-mdx-remote/rsc';
+
+// Helper function to extract frontmatter from MDX content
+export async function extractFrontmatter<T>(source: string): Promise<T> {
+  const { frontmatter } = await compileMDX<T>({
+    source,
+    options: {
+      parseFrontmatter: true,
+      ...mdxOptions,
+    },
+  });
+
+  return frontmatter;
+}
+
+// Helper function to compile MDX content
+export async function compileMdxContent(
+  source: string,
+  components = mdxComponents
+) {
+  const { content } = await compileMDX({
+    source,
+    components,
+    options: {
+      parseFrontmatter: true,
+      ...mdxOptions,
+    },
+  });
+
+  return content;
+}
 
 // Define the blog post metadata type
 export interface BlogPost {
@@ -50,16 +81,13 @@ export async function getBlogPostBySlug(
     const filePath = path.join(blogDirectory, `${slug}.mdx`);
     const fileContent = fs.readFileSync(filePath, 'utf8');
 
-    // Use next-mdx-remote to compile the MDX content
-    const { frontmatter } = await compileMDX<{
+    // Extract frontmatter from the MDX content
+    const frontmatter = await extractFrontmatter<{
       title: string;
       date: string;
       author: string;
       excerpt: string;
-    }>({
-      source: fileContent,
-      options: { parseFrontmatter: true },
-    });
+    }>(fileContent);
 
     return {
       slug,
@@ -81,16 +109,13 @@ export async function getPuzzleBySlug(slug: string): Promise<Puzzle | null> {
     const filePath = path.join(puzzlesDirectory, `${slug}.mdx`);
     const fileContent = fs.readFileSync(filePath, 'utf8');
 
-    // Use next-mdx-remote to compile the MDX content
-    const { frontmatter } = await compileMDX<{
+    // Extract frontmatter from the MDX content
+    const frontmatter = await extractFrontmatter<{
       title: string;
       description: string;
       starter_code?: string;
       starter_code_language?: string;
-    }>({
-      source: fileContent,
-      options: { parseFrontmatter: true },
-    });
+    }>(fileContent);
 
     return {
       slug,

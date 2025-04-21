@@ -1,8 +1,11 @@
 import { mdxComponents } from '@/components/mdx-components';
-import { getBlogPostBySlug, getBlogPostSlugs } from '@/lib/mdx';
+import {
+  compileMdxContent,
+  getBlogPostBySlug,
+  getBlogPostSlugs,
+} from '@/lib/mdx';
 import { SEO } from '@/lib/seo';
 import type { Metadata } from 'next';
-import { compileMDX } from 'next-mdx-remote/rsc';
 import { notFound } from 'next/navigation';
 import { BlogPostContent } from './BlogPostContent';
 
@@ -64,12 +67,8 @@ export default async function BlogPostPage({
     notFound();
   }
 
-  // Use next-mdx-remote to compile the MDX content
-  const { content } = await compileMDX({
-    source: post.content,
-    components: mdxComponents,
-    options: { parseFrontmatter: true },
-  });
+  // Use helper function to compile the MDX content
+  const content = await compileMdxContent(post.content);
 
   return (
     <BlogPostContent

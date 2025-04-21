@@ -1,0 +1,146 @@
+---
+title: "Health checks"
+excerpt: "Designing a data correctness verification system"
+date: "April 21, 2025"
+author: "Kevin Bai"
+---
+
+At Slash, we’re powering billions of dollars of spend a year. Having grown over 1000%  over the past 12 months, we’re constantly solving new problems at increasing scale. As the amount of data grew and our system became more complex, assumptions we made about data relationships would oftentimes break. Issues would happen due to bad backfills, bugs in production code, or small mistakes during data migrations. Over time, it became increasingly hard to verify the correctness of our data which led us to build what we now call Health Checks — a system designed to continuously verify data correctness in production.
+
+Health checks are a tool to help us verify invariants in our codebase. When we build systems, we always design them with a set of implicit and explicit invariants, which are rules / assumptions that we assume to always hold true so that we can build more complex systems on top of them. 
+
+> One more trivial example of an invariant: in the `Card` table in our DB, where each row represents a credit card, there is a `status` column where one of the values can be “closed” and a `closedReason` column that is NULLABLE. One invariant is that the `status` column is “closed” **if and only if** the `closedReason` field is NOT NULL.
+> 
+
+The example above isn't necessarily a condition where we'd write a health check for, but is an example of an invariant that we ensure holds true while working with this area of the codebase.
+
+### Our initial health check design
+
+Our first iteration of health checks looked something like this below:
+
+```typescript
+/**
+ * This health check ensures that for every declined AuthorizationSet, there are no transfer intents
+ */
+export const hcrForDeclinedAuthSets = createHealthCheckRoutineDefinition({
+  programmaticName: 'chargeCard.authSets.declinedAuthSets',
+  title: 'Charge card declined auth sets',
+  description:
+    'This health check ensures for every declined AuthorizationSet, there are no transfer intents',
+  schedule: {
+    type: 'interval',
+    interval: 'minutes',
+    frequency: 30,
+  },
+})
+  .bulkCheckFn((deps: DefineDependencies<[HealthCheckModule.Service]>) => {
+    return async (
+      cursor:
+        | HealthCheckRoutineCursor<{
+            authorizationSetId: string;
+          }>
+        | undefined
+    ) => {
+	    // getErrorAccounts -> a query to Snowflake
+      const errorAccounts = await getErrorAccounts(cursor, deps);
+
+      return {
+        data: errorAccounts.data.map((val) => ({
+          key: val.authorizationSetId,
+        })),
+        nextCursor: errorAccounts.nextCursor,
+      };
+    };
+  })
+  .singleCheckFn(() => async (params) => {
+    const singleCheckRes = await runQuery(
+      sql`...`
+    );
+
+    return {
+      success: singleCheckRes.length === 0,
+    };
+  });
+```
+
+We initially designed health checks to be defined by SQL queries. We would run a SQL query against a table to find any “potential errors”. But because running SQL queries against large tables are expensive, we would run these checks against an eventually consistent read replica (in our case, this was Snowflake). For each result returned from the query, we would then run a check against our main production database to ensure it wasn't a false positive. This design had a few issues:
+
+1. We had to maintain two queries: one that gets ran against the read replica for the whole table, and another query that gets ran against production for that individual item. Additionally, every time a query against a whole table was defined, you had to think about how to paginate the query in chunks.
+2. Queries against the entire table would become increasingly complex and unreadable / hard to maintain since we’d be trying to encode a bunch of business logic into a single SQL query.
+
+### Second iteration of health checks
+
+We decided that:
+
+1. Health checks should be ran against our primary production database always. Otherwise, we might not be catching every issue that actually happens. 
+2. Performing “full table scans” in a SQL query is a big no, but performing a controlled “full table scan” by iterating over each item and performing a health check is actually fine - as long as load is constant, predictable and doesn’t spike, things tend to be okay.
+3. Performing an iteration over time on tables in production (and abstracting that away for the developer) simplifies our DX a ton:
+    1. We no longer need to maintain two complex sql queries with pagination. We only need to define the application logic for checking the health of a single item.
+    2. Every health check is defined over an entire table (in the future, we may choose extend health checks so that it can iterate specifically over an index definition)
+
+One big learning we’ve had as a team over time is that predictable systems that exert constant load are ideal. The biggest culprit to production issues has typically been sudden unpredictable changes such as a large spike in DB load, or a sudden change in a database internal query planner.
+
+The counterintuitive thing to constant load, especially WRT your database and queues, is that it can seem wasteful. I used to believe it was much better to put no load on systems by default and only do work the few times a day when needed. However, this can lead to spiky workloads that can degrade your system unexpecetedly. In actuality, we've found it usually always better for there to be a small constant load running against the DB over a long period of time, even if the constant load contributes to something like 1% - 5% usage to the overall CPU 24/7. When load is predictable, it’s easy to monitor usage rates across the board and allows you to predictably scale horizontally or even to plan to tackle growing performance issues.
+
+There's a insightful read about this by the team at AWS: [Reliability, constant work, and a good cup of coffee](https://aws.amazon.com/builders-library/reliability-and-constant-work/) 
+
+The second version of our health checks now look like:
+
+```typescript
+export const savingsAccount = createHealthCheckGroup({
+  over: SlashAccountGroup,
+  name: 'savings_account_interest_entities',
+  schedules: {
+    full_scan: {
+      type: 'full_scan',
+      config: {},
+      props: {
+        numberOfItemsToPaginate: 2000,
+        minimumIntervalSinceStartOfLastRun: 3 * 60 * 60 * 1000,
+      },
+    },
+  },
+  checks: {
+    interest_limit_rule_should_exist: {
+      async check(group, ctx) {
+        if (group.groupType === 'savings') {
+          const activeInterestLimits = await from(SlashAccountGroupLimitRule)
+            .leftJoin(LimitRule, {
+              on: (_) => _.lr.id.equals(_.slr.limitRuleId),
+            })
+            .where((_) =>
+              _.slr.slashAccountGroupId
+                .equals(group.id)
+                .and(_.slr.isActive.equals(true))
+                .and(_.lr.type.equals('interest'))
+            );
+
+          ctx.shouldHaveLengthOf(activeInterestLimits, 1, {
+            message:
+              'Savings accounts should have exactly one active interest limit',
+          });
+        }
+      },
+    },
+    // other checks
+    ...
+  }
+});
+```
+
+With this design, it becomes very easy to add new health checks onto a single entity since each health check is defined as an asynchronous single function. We could have these health checks iterating over entire tables multiple times a day without needing to make a tradeoff between frequency since the load is constant. For the health check above, each entity does a simple fast lookup to the `LimitRule` table and these checks are constantly running, putting minimal, but constant load on the database at any given point in time.
+
+How this system actually runs under the hood can be simplified to roughly the following design:
+1. We run our checks on top of Temporal so that we guarantee eventual execution. We use Temporal's "schedules" product to ensure that we run our cron every minute.
+2. Each minute, we look at all the checks that should be scheduled NOW, and run those checks in a task queue. We throttle our task queue accordingly so that there is never more than a certain RPS being sent to Datadog.
+3. Each activity ran is performing some "constant" work. No O(N) or any other type of activity that grows WRT to the total number of entities in the database. This ensures that activities perform quickly, are easy to predict, and will not block the task queue itself. 
+
+### What’s next
+
+Health checks today form an important basis in our testing pipeline. It’s the foundation to our ongoing production verification tests. As we’ve grown, the reality has been that more and more general testing is required to keep our product stable and functional. It took us several tries to get this right -- doing some sort of ledger testing / health verification has been something that we've wanted to do early on (over three years ago), but it wasn’t until a year and a half ago when we finally built something out. Overall some important lessons we’ve learned are:
+
+1. Ship something, anything, and iterate on it over time. We couldn’t have reached the second iteration of our health checks without having shipped the first one.
+2. Keep it simple — you want to make it as easy as possible for engineers to build and maintain health checks. Complex business logic embedded in multiple SQL queries is never fun to work with.
+3. Run your checks directly on production — that’s your source of truth and if you don’t run it against your source of truth, it’ll inherently be more complex and more susceptible to false positives / negatives.
+
+As we continue to grow, we’ll introduce new forms of production verification as the demand for it grows, and implementing health checks is only just the very beginning so far.

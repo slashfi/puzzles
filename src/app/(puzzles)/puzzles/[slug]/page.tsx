@@ -1,9 +1,7 @@
 import { ContentLayout } from '@/components/layout/ContentLayout';
-import { mdxComponents } from '@/components/mdx-components';
-import { getPuzzleBySlug, getPuzzleSlugs } from '@/lib/mdx';
+import { compileMdxContent, getPuzzleBySlug, getPuzzleSlugs } from '@/lib/mdx';
 import { SEO } from '@/lib/seo';
 import type { Metadata } from 'next';
-import { compileMDX } from 'next-mdx-remote/rsc';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { CodeEditorWrapper } from './CodeEditorWrapper';
@@ -53,12 +51,8 @@ export default async function PuzzlePage({ params }: PuzzlePageProps) {
     notFound();
   }
 
-  // Use next-mdx-remote to compile the MDX content
-  const { content } = await compileMDX({
-    source: puzzle.content,
-    components: mdxComponents,
-    options: { parseFrontmatter: true },
-  });
+  // Use helper function to compile the MDX content
+  const content = await compileMdxContent(puzzle.content);
 
   // Get the starter code from the frontmatter or use a default
   const starterCode = puzzle.starter_code || '// Write your solution here';

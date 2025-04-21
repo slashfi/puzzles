@@ -40,7 +40,7 @@ export default async function Home() {
                 type="blog"
                 title={post.title}
                 description={''}
-                image="/globe.svg" // Using default image
+                image={post.image || '/globe.svg'} // Use custom image if available, otherwise default
                 slug={post.slug}
                 date={post.date}
                 author={post.author}
@@ -54,7 +54,7 @@ export default async function Home() {
                 type="puzzle"
                 title={puzzle.title}
                 description={puzzle.description}
-                image="/file.svg" // Using default image
+                image={puzzle.image || '/file.svg'} // Use custom image if available, otherwise default
                 slug={puzzle.slug}
               />
             ))}

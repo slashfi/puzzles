@@ -1,8 +1,39 @@
 import { cn } from '@/lib/utils';
+import type { MDXRemoteProps } from 'next-mdx-remote/rsc';
+import rehypePrettyCode from 'rehype-pretty-code';
+import type { Options } from 'rehype-pretty-code';
 import { Video } from './Video';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { Card } from './ui/card';
+
+// Shiki configuration for syntax highlighting
+export const rehypePrettyCodeOptions: Partial<Options> = {
+  theme: 'github-dark',
+  keepBackground: true,
+  // Callback to get the highlighted code as an HTML string
+  onVisitLine(node) {
+    // Prevent lines from collapsing in `display: grid` mode
+    if (node.children.length === 0) {
+      node.children = [{ type: 'text', value: ' ' }];
+    }
+  },
+  // Callback to add custom styles to the code blocks
+  onVisitHighlightedLine(node) {
+    node.properties.className = ['highlighted'];
+  },
+  // Callback to add custom styles to the highlighted characters
+  onVisitHighlightedChars(node) {
+    node.properties.className = ['word'];
+  },
+};
+
+// MDX rehype plugins configuration
+export const mdxOptions: MDXRemoteProps['options'] = {
+  mdxOptions: {
+    rehypePlugins: [[rehypePrettyCode, rehypePrettyCodeOptions]],
+  },
+};
 
 // Define custom components for MDX content
 export const mdxComponents = {

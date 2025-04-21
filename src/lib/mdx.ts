@@ -41,6 +41,7 @@ export interface BlogPost {
   author: string;
   excerpt: string;
   content: string;
+  image?: string;
 }
 
 // Define the puzzle metadata type
@@ -51,6 +52,7 @@ export interface Puzzle {
   content: string;
   starter_code?: string;
   starter_code_language?: string;
+  image?: string;
 }
 
 // Path to the content directories
@@ -87,6 +89,7 @@ export async function getBlogPostBySlug(
       date: string;
       author: string;
       excerpt: string;
+      image?: string;
     }>(fileContent);
 
     return {
@@ -96,6 +99,7 @@ export async function getBlogPostBySlug(
       author: frontmatter.author,
       excerpt: frontmatter.excerpt,
       content: fileContent,
+      image: frontmatter.image,
     };
   } catch (error) {
     console.error(`Error reading blog post ${slug}:`, error);
@@ -115,6 +119,7 @@ export async function getPuzzleBySlug(slug: string): Promise<Puzzle | null> {
       description: string;
       starter_code?: string;
       starter_code_language?: string;
+      image?: string;
     }>(fileContent);
 
     return {
@@ -124,6 +129,7 @@ export async function getPuzzleBySlug(slug: string): Promise<Puzzle | null> {
       starter_code: frontmatter.starter_code,
       starter_code_language: frontmatter.starter_code_language,
       content: fileContent,
+      image: frontmatter.image,
     };
   } catch (error) {
     console.error(`Error reading puzzle ${slug}:`, error);

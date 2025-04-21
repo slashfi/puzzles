@@ -3,6 +3,7 @@ title: "Health checks"
 excerpt: "Designing a data correctness verification system"
 date: "April 21, 2025"
 author: "Kevin Bai"
+image: "/health-check.svg"
 ---
 
 At Slash, we’re powering billions of dollars of spend annually. Having grown over 1000% during the past 12 months, we’re constantly solving new problems at increasing scale. As the amount of data grew and our system became more complex, assumptions we made about data relationships would often break. We encountered issues from multiple sources: bad backfills, bugs in production code, and small mistakes during data migrations. Over time, it became increasingly hard to verify the correctness of our data which led us to build what we now call Health Checks — a system designed to continuously verify data correctness in production.
@@ -143,4 +144,4 @@ Health checks today form an important basis in our testing pipeline. It’s the 
 2. Keep it simple — we want to make it as easy as possible for engineers to build and maintain health checks. Complex business logic embedded in multiple SQL queries is never fun to work with.
 3. Run our checks directly on production — that’s our source of truth, and if we're running things against something else, it’ll inherently be more complex and more susceptible to false positives / negatives.
 
-Today, health checks are the first step we've taken to better test and verify our systems outside of more traditional testing and observability. As we continue to grow, we'll introduce new forms of production verification over time as needed.
+Today, health checks are the first step we've taken to better test and verify our systems outside of more traditional forms such as testing and observability. As we continue to grow, we'll progressively reflect and figure out new ways to keep our product stable.

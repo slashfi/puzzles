@@ -1,0 +1,291 @@
+---
+title: "Scaling 1m lines of Typescript: Registries"
+excerpt: "A design pattern we use "
+date: "May 7, 2025"
+author: "Jason Jiang"
+---
+
+Today, we have about 1.1M lines of committed Typescript code in our monorepo. Scaling it has come with a myriad of challenges — in particular, slow type checking, bloated imports, and code traceability. Over the past few years, we’ve explored and iterated with various design patterns to best scale our codebase. In the process, we made mistakes and wrote code in ways that caused issues as our codebase grew. We eventually stumbled upon a pattern we now call Registries. It’s simple and one of the most scalable patterns we’ve adopted.
+
+Our original internal event handling code is a good example of where this pattern made a huge difference. It started simple, but over time led to giant type unions causing slow type checking, barrel files that imported too much code, and hard-to-trace code.
+
+## Original design
+
+At a high level, our events service is built on top of a message queue (MQ). Events are recorded and sent to the MQ by various anywhere in our backend (API pods, worker pods, etc.) and processed by a worker exactly once.
+
+The design itself is very simple and the only main constraint is that all events must be fully serializable over the wire. Most of the complexity and maintenance stems from type safety + developer experience.
+
+1. Define a set of base-helpers:
+    
+    ```typescript
+    // ./app-event-handler/base.ts
+    export interface AppEventBase {
+        type: string;
+    }
+    
+    export interface AppEventHandler<Ev extends AppEventBase> {
+        type: Ev['type'];
+        handler: (data: Ev) => Promise<void>
+    }
+    
+    export function createAppEventHandler<Ev extends AppEventBase>(
+        event: Ev['type',
+        handler: (data: Ev) => Promise<void>
+    ): AppEventHandler<Ev> {
+        return { type: event, handler }
+    }
+    ```
+    
+2. Define event handlers in their own file
+    
+    ```typescript
+    // ./app-event-handlers/card.ts
+    import type { AppEventBase } from './base.ts';
+    
+    interface CardCreatedAppEvent {
+        type: 'card_created';
+        cardName: string;
+    }
+    
+    export const cardCreatedEventHandler = createAppEventHandler<CardCreatedAppEvent>(
+      'card_created',
+      async (ev) => {
+          await sendNotificationToUsers();
+      }
+    );
+    
+    // ./app-event-handlers/wire.ts
+    import type { AppEventBase } from './base.ts';
+    
+    interface WireSentEvent extends EventBase {
+      type: 'wire_sent';
+      amount: number;
+    }
+    
+    export const wireSentEventHandler = createEventHandler<WireCreatedEvent>(
+      'wire_sent',
+      async (ev) => {
+          await sendNotificationToUsers();
+      }
+    )
+    ```
+    
+3. Define a rollup file
+    
+    ```typescript
+    // ./app-event-handlers/rollup.ts
+    export * from './card.ts';
+    export * from './wire.ts';
+    ```
+    
+4. Define event handlers
+    
+    ```typescript
+    // ./app-event-handlers/index.ts
+    import type { AppEventBase } from './base.ts';
+    import * as AppEventHandlers from './rollup.ts';
+    
+    export type AppEvent = {
+        [Key in keyof typeof EventHandlers]: 
+            (typeof EventHandlers)[Key] extends AppEventHandler<infer Ev extends AppEventBase>
+                ? Ev
+                : never;
+    }[keyof typeof EventHandlers];
+    
+    export { AppEventHandlers };
+    ```
+    
+5. Define a common function to record events
+    
+    ```typescript
+    // ./record-app-event.ts
+    import { mqClient } from '@server/message-queue/client.ts';
+    import type { AppEvent } from './app-event-handlers'
+    
+    export async function recordEvent<Ev extends AppEvent>(ev: Ev) {
+        await mqClient.push('events', ev);
+    }
+    ```
+
+6. Export a function that processes the event handler for the queue in a worker
+    
+    ```typescript
+    // ./process-app-event.ts
+    import { AppEventHandlers, type AppEvent } from './app-event-handlers/index.ts';
+    
+    const appEventHandlerMap = new Map(
+        Object.values(AppEventHandlers).map(item => [item.type, item.handler])
+    );
+    
+    export async function processAppEventHandler(ev: AppEvent) {
+        const handler = appEventHandlerMap.get(ev.type);
+        
+        if (!handler) {
+            throw 'some error';
+        }
+    
+        await handler(ev as any);
+    }
+    ```
+    
+At a glance, this design looks pretty okay. It's type safe, easy to understand and work with, and clear on how to create new events. However, there were several issues:
+
+**Type checking complexity:** For each new event, the `AppEvent` union type grows larger. Individually, a single union isn't problematic, but as the usage of this pattern increases across the codebase (multiple type unions), type checking performance quickly degrades.
+
+**Eager module loading:** Our pattern of rollup files meant nearly every module imported the entire codebase at startup, making lazy-loading impossible. This also prevented us from easily splitting the server into separate bundles for different deployments. While eager-loading the full codebase was acceptable in production, it severely impacted development and testing, taking over 20–30 seconds just to start the development server.
+
+**Poor traceability:** Answering simple questions like "where is this event's implementation?" or "where is this handler called?" was difficult. We had to rely on full-text searches of string literals. If event names were constructed using dynamic string interpolation, it became very hard to figure out where events were called from.
+
+**Lack of clear domain boundaries:** As we introduced more homogeneous interfaces (event handlers, DB entities, health checks), it encouraged colocating similar interfaces in the same folder rather than grouping by domain logic. This fragmented our business logic, making domain-specific context switching more frequent and complex.
+
+## Iterating on this design
+
+In the setup above, we put all event handlers in `./app-event-handlers/<event_type>.ts` files. While having them all in one folder made discovery easy, it didn’t reflect how we actually worked. In practice, colocating event handlers with the rest of the relevant application logic proved way more useful than grouping them with other handlers.
+
+That’s where the idea of adding subextensions to files (`.event-handler.ts`) came in. They let us colocate by domain while still enabling easy discovery by looking up the extension. The file extension further allowed us to remove manually maintained rollup files since we could scan for all files matching the extension in the repository at runtime.
+
+Here is an abbreviated version of the base registry code and how it works. `loadModules` will scan all files and register all exported objects with a `$discriminator` property matching the same symbol passed into `createRegistry`.
+
+```typescript
+// ./registry.ts
+interface Registry<T> {
+  loadModules(): Promise<void>;
+  get<Throws extends boolean>(key: string, options?: { throws?: Throws }): boolean extends Throws ? T | undefined : T;
+}
+export function createRegistry<T extends { $discriminator: symbol }>(options: {
+  discriminator: T['$discriminator'];
+  registryExtension: `${string}.ts`;
+  getKey: (value: T) => string;
+}): Registry<T> {
+  // implementation ...
+}
+```
+
+Now, the following is what building our event handler looks like using Registries:
+
+1. Define a registry in a `<name>.registry.ts` file:
+    ```typescript
+    // ./app-event-handler.registry.ts
+    import { createRegistry } from '@/registry';
+
+    const appEventHandlerDiscriminator = Symbol('app-event-handler');
+    export const appEventHandlerRegistry = createRegistry<AppEventHandler<AppEventBase>>({
+      discriminator: appEventHandlerDiscriminator,
+      registryExtension: '.app-event-handler.ts',
+      getKey: (mod) => mod.type,
+    });
+
+    // in the registry file, we also define our base types and other helpers
+    interface AppEventBase {
+      type: string
+    }
+    /**
+     * Define an interface that exposes a `$disriminator` prop
+      */
+    export interface AppEventHandler<Ev extends AppEventBase> {
+      $discriminator: typeof appEventHandlerDiscriminator;
+      type: Ev['type'];
+      handler: (data: Ev) => Promise<void>;
+    }
+
+    /**
+     * Define the method we'll actually use to create 
+    */
+    export function createAppEventHandler<Ev extends AppEventBase>(
+      event: Ev['type',
+      handler: (data: Ev) => Promise<void>
+    ): AppEventHandler<Ev> {
+        return { $discriminator: appEventHandlerDiscriminator, type: event, handler }
+    }
+    ```
+2. Define the actual event handlers in `.app-event-handler.ts` files
+    ```typescript
+    // ./card-service/card.app-event-handler.ts
+    import { type AppEventBase, createAppEventHandler } from '@/app-event-handler.registry';
+    
+    interface CardCreatedAppEvent {
+        type: 'card_created';
+        cardName: string;
+    }
+    
+    export const cardCreatedEventHandler = createAppEventHandler<CardCreatedAppEvent>(
+      'card_created',
+      async (ev) => {
+          await sendNotificationToUsers();
+      }
+    );
+  
+    // ./transfers/wire.app-event-handler.ts
+    import { type AppEventBase, createAppEventHandler } from '@/app-event-handler.registry';
+
+    interface WireSentEvent extends EventBase {
+      type: 'wire_sent';
+      amount: number;
+    }
+    
+    export const wireSentEventHandler = createEventHandler<WireCreatedEvent>(
+      'wire_sent',
+      async (ev) => {
+          await sendNotificationToUsers();
+      }
+    )
+    ```
+3. Define a common function to record events
+    
+    ```typescript
+    // ./record-app-event.ts
+    import { mqClient } from '@server/message-queue/client.ts';
+    import type { AppEvent } from './app-event-handlers'
+    
+    export async function recordEvent<Ev extends AppEventBase>(
+      _ev: AppEventHandler<Ev>, 
+      eventData: Ev
+    ) {
+      await mqClient.push('events', eventData);
+    }
+    // Note, the _ev variable is used here mainly for tracing symbols.
+    // There _is_ a downside that we are unnecessarily importing
+    // AppEventHandler code itself (and any other imports that file exports)
+    // but for the purposes of making the DX better, this is an acceptable
+    // tradeoff that we are okay with.
+    ```
+4. Export a function that processes the event handler for the queue in a worker
+    
+    ```typescript
+    // ./process-app-event.ts
+    import { type AppEventBase, appEventHandlerRegistry } from './app-event-handler.registry';
+    
+    export async function processAppEventHandler(ev: AppEventBase) {
+        const item = appEventHandlerRegistry.get(ev.type, { throws: true });
+    
+        await item.handler(ev);
+    }
+    ```
+
+Some important differences to note:
+
+**Code traceability is much better**: Anytime you record an event, you record it like this: 
+  ```ts
+  await recordEvent(cardCreatedEventHandler, { type: 'card_created', ... })
+  ``` 
+This means that it's easy to trace all places where `cardCreatedEventHandler` is used by using AST tools like "Find all references" (in VS Code). Inversely, when you see a `recordEvent` call, it's easy to use AST tools such as "Go to implementation" in one click to see the actual definition of the event itself.
+
+**No more type unions**: Rather, we're using base types, which is something that [Typescript](https://github.com/microsoft/Typescript/wiki/Performance#preferring-base-types-over-unions) encourages to avoid type checking performance issues.
+
+**Event handlers are co-located with domain-specific logic**: App event handlers are no longer stored in a single folder, they are stored beside where its corresponding business logic lives. For example, when working with card creation code, it's very useful to easily access the code that acts as the handler for card creation even if it runs in a different worker process.
+
+## Working with Registries today
+Today, we work with dozens of registries to keep all code colocated with their application logic counterparts. Some notable ones include:
+- `.db.ts` to register database entities
+- `.workflows.ts` and `.activities.ts` to register [Temporal](https://docs.temporal.io/develop/typescript) workflows
+- `.checks.ts` to register health checks (check out the [blog post](https://puzzles.slash.com/blog/health-checks) about health checks)
+- `.main.ts` to register services that encompass a specific domain grouping together business logic.
+- `.permission-role.ts` and `.permission-key.ts` to define RBAC permissions in our product
+- `.email-box.ts` to define a filter for an email box to define a "handler" for parsing emails in a gmail account.
+- `.cron.ts` to register cron jobs
+- `.ledger-balance.ts` to define our internal financial "ledger" primitive.
+- `.metrics.ts` to define Datadog metrics 
+
+And a several other more domain-specific extensions.
+
+At this point in time, we haven't open sourced this pattern, but hopefully this post should provide a clear idea of how it can be implemented in other codebases. If you found this useful, try implementing this in your own projects and let us know what you find!

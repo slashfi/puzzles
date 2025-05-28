@@ -1,22 +1,22 @@
 ---
-title: "Scaling 1m lines of Typescript: Registries"
-excerpt: "A design pattern we use "
+title: "Scaling 1M lines of TypeScript: Registries"
+excerpt: "A design pattern called Registries we use to scale our 1M-line TypeScript codebase"
 date: "May 9, 2025"
 author: "Jason Jiang"
 ---
 
-Today, we have about 1.1M lines of committed Typescript code in our monorepo. Scaling it has come with a myriad of challenges — in particular, slow type checking, bloated imports, and code traceability. Over the past few years, we’ve explored and iterated with various design patterns to best scale our codebase. In the process, we made mistakes and wrote code in ways that caused issues as our codebase grew. We eventually stumbled upon a pattern we now call Registries. It’s simple and one of the most scalable patterns we’ve adopted.
+Today, we have about 1.1M lines of committed TypeScript code in our monorepo. Scaling it has come with a range of challenges such as slow type checking, bloated imports, and increasingly poor code traceability. Over the past few years, we’ve explored and iterated with various design patterns to better scale our codebase. One pattern we stumbled upon helped alleviate many of our growing code organization pains: Registries. It’s simple and one of the most scalable patterns we’ve adopted.
 
-Our original internal event handling code is a good example of where this pattern made a huge difference. It started simple, but over time led to giant type unions causing slow type checking, barrel files that imported too much code, and hard-to-trace code. Lastly, it introduced developer friction in maintaining and adding new event handlers.
+Our original internal event handling code is a good example of where this pattern made a huge difference. It started simple, but over time led to giant type unions causing slow type checking, barrel files that imported too much code, and hard-to-trace code due to excessive string concatenation. Lastly, it introduced developer friction in maintaining and adding new event handlers.
 
 ## Original design
 
-At a high level, our events service is built on top of a message queue (MQ). Events are recorded and sent to the MQ by various anywhere in our backend (API pods, worker pods, etc.) and processed by a worker exactly once.
+At a high level, our events service is built on top of a message queue (MQ). Events are recorded and sent to the MQ from anywhere in our backend (API pods, worker pods, etc.) and processed by a worker exactly once.
 
-The design itself is very simple and the only main constraint is that all events must be fully serializable over the wire. Most of the complexity and maintenance stems from type safety + developer experience.
+The design itself is very simple; the only main constraint is that all events must be fully serializable over the wire. Most of the complexity and maintenance stems from type safety and developer experience.
 
 1. Define a set of base-helpers:
-    
+
 ```typescript
 // ./app-event-handler/base.ts
 export interface AppEventBase {
@@ -49,7 +49,9 @@ export interface CardCreatedEvent extends AppEventBase {
 
 export interface WireSentEvent extends AppEventBase {
   type: 'wire_sent';
-  amount: number;
+  data: {
+    amount: number;
+  }
 }
 
 export type AppEvent = CardCreatedEvent | WireSentEvent;
@@ -140,15 +142,13 @@ export async function processAppEventHandler(ev: AppEvent) {
 }
 ```
     
-At a glance, this design looks pretty okay. It's type safe, easy to understand and work with, and clear on how to create new events. However, there were several issues:
+At a glance, this design looks pretty okay. It's type safe, easy to understand, simple to work with, and clear on how to create new events. However, there were several issues:
 
-**Type checking complexity:** For each new event, the `AppEvent` union type grows larger. Individually, a single union isn't problematic, but as the usage of this pattern increases across the codebase (multiple type unions), type checking performance quickly degrades.
+**Type checking complexity:** For each new event, the `AppEvent` type grows larger. Individually, a single union isn't problematic, but as the usage of this pattern increases across the codebase (multiple type unions), type checking performance quickly degrades.
 
 **Eager module loading:** Our pattern of rollup files meant nearly every module imported the entire codebase at startup, making lazy-loading impossible. This also prevented us from easily splitting the server into separate bundles for different deployments. While eager-loading the full codebase was acceptable in production, it severely impacted development and testing, taking over 20–30 seconds just to start the development server.
 
-**Poor traceability:** Answering simple questions like "where is this event's implementation?" or "where is this handler called?" was difficult. We had to rely on full-text searches of string literals. If event names were constructed using dynamic string interpolation, it became very hard to figure out where events were called from.
-
-For example, if we had code like this:
+**Poor traceability:** Answering simple questions like "where is this event's implementation?" or "where is this handler called?" was difficult. We had to rely on full-text searches of string literals. For example, if an engineer decided to do something like this:
 
 ```typescript
 const eventName = `wire_${type}`; // Valid because type is a union between 'created' | 'sent', which are both defined events
@@ -156,7 +156,7 @@ const eventName = `wire_${type}`; // Valid because type is a union between 'crea
 await recordEvent({ type: eventName, data });
 ```
 
-It would be very hard to trace that the wire_sent and wire_created events are triggered from here.
+It would be very hard to trace that the `wire_sent` and `wire_created` events are triggered from here. Searching for the string "wire_sent" in the codebase wouldn't reveal this usage, since the name is constructed dynamically. As a result, this information becomes obscure "tribal" knowledge that ends up living in the heads of a select few engineers.
 
 **Lack of clear domain boundaries:** As we introduced more homogeneous interfaces (event handlers, DB entities, health checks), it encouraged colocating similar interfaces in the same folder rather than grouping by domain logic. This fragmented our business logic, making domain-specific context switching more frequent and complex.
 
@@ -206,7 +206,7 @@ export interface AppEventBase {
 }
 
 /**
-  * Define an interface that exposes a `$disriminator` prop
+  * Define an interface that exposes a `$discriminator` prop
   */
 export interface AppEventHandler<Ev extends AppEventBase> {
   $discriminator: typeof appEventHandlerDiscriminator;
@@ -257,7 +257,9 @@ import { createAppEventHandler } from '@/app-event-handler.registry';
 
 interface WireSentEvent extends AppEventBase {
   type: 'wire_sent';
-  amount: number;
+  data: {
+    amount: number;
+  }
 }
 
 export const wireSentEventHandler = createAppEventHandler<WireSentEvent>(
@@ -302,24 +304,32 @@ Some important differences to note:
 ```ts
 await recordEvent(cardCreatedEventHandler, { cardName: 'John Doe' })
 ``` 
-This means that it's easy to trace all places where `cardCreatedEventHandler` is used by using AST tools like "Find all references" (in VS Code). Inversely, when you see a `recordEvent` call, it's easy to use AST tools such as "Go to implementation" in one click to see the actual definition of the event itself.
+This means that it's easy to trace all places where `cardCreatedEventHandler` is used by using AST tools like "Find all references" (in VS Code). Conversely, when you see a `recordEvent` call, you can "Go to implementation" in one click to find the event definition and its handler.
 
-**No more type unions**: Rather, we're using base types, which is something that [Typescript](https://github.com/microsoft/Typescript/wiki/Performance#preferring-base-types-over-unions) encourages to avoid type checking performance issues.
+**No more type unions**: Rather, we're using base types, which is something that [TypeScript](https://github.com/microsoft/TypeScript/wiki/Performance#preferring-base-types-over-unions) encourages to avoid type checking performance issues that large unions incur.
 
-**Event handlers are co-located with domain-specific logic**: App event handlers are no longer stored in a single folder- they are stored beside where its corresponding business logic lives. For example, when working with card creation code, it's very useful to easily access the code that acts as the handler for card creation and have it colocated with the rest of the card service, even if it runs in a different worker process.
+**Event handlers are co-located with domain-specific logic**: App event handlers are no longer stored in a single folder. Instead, they are colocated alongside the relevant business logic. For example, a domain-specific service might look something like this:
+```
+/ services
+  / card-service
+    - card-service.main.ts
+    - card-lifecycle.app-event-handler.ts
+    - card.db.ts
+    ...
+```
 
 ## Working with Registries today
-Today, we work with dozens of registries to keep all code colocated with their application logic counterparts. Some notable ones include:
-- `.db.ts` to register database entities
-- `.workflows.ts` and `.activities.ts` to register [Temporal](https://docs.temporal.io/develop/typescript) workflows
-- `.checks.ts` to register health checks (check out the [blog post](https://puzzles.slash.com/blog/health-checks) about health checks)
-- `.main.ts` to register services that encompass a specific domain grouping together business logic.
-- `.permission-role.ts` and `.permission-key.ts` to define RBAC permissions in our product
-- `.email-box.ts` to define a filter for an email box to define a "handler" for parsing emails in a gmail account.
-- `.cron.ts` to register cron jobs
-- `.ledger-balance.ts` to define our internal financial "ledger" primitive.
-- `.metrics.ts` to define Datadog metrics 
+Today, we work with dozens of registries to keep all code colocated with their application logic. Some notable ones include:
+- `.db.ts` for registering database entities
+- `.workflows.ts` and `.activities.ts` for registering [Temporal](https://docs.temporal.io/develop/typescript) workflows
+- `.checks.ts` for registering health checks ([blog post](https://puzzles.slash.com/blog/health-checks))
+- `.main.ts` for registering services that group together domain-specific business logic
+- `.permission-role.ts` and `.permission-key.ts` for defining RBAC permissions in our product
+- `.email-box.ts` for registering handlers that parse emails in a Gmail account
+- `.cron.ts` for registering cron jobs
+- `.ledger-balance.ts` for defining our internal financial "ledger" primitive
+- `.metrics.ts` for defining Datadog metrics
 
-And a several other more domain-specific extensions.
+and several other domain-specific extensions.
 
-At this point in time, we haven't open sourced this pattern, but hopefully this post should provide a clear idea of how it can be implemented in other codebases. If you found this useful, try implementing this in your own projects and let us know what you find!
+At this point in time, we haven't open sourced this pattern, but hopefully this post should provide a clear idea of how it can be implemented in other codebases. If you found this useful, try implementing it in your own projects and let us know how it goes!

@@ -50,6 +50,7 @@ export interface Puzzle {
   title: string;
   description: string;
   content: string;
+  date: string;
   starter_code?: string;
   starter_code_language?: string;
   image?: string;

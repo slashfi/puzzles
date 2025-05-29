@@ -118,6 +118,7 @@ export async function getPuzzleBySlug(slug: string): Promise<Puzzle | null> {
     const frontmatter = await extractFrontmatter<{
       title: string;
       description: string;
+      date: string;
       starter_code?: string;
       starter_code_language?: string;
       image?: string;
@@ -127,6 +128,7 @@ export async function getPuzzleBySlug(slug: string): Promise<Puzzle | null> {
       slug,
       title: frontmatter.title,
       description: frontmatter.description,
+      date: frontmatter.date,
       starter_code: frontmatter.starter_code,
       starter_code_language: frontmatter.starter_code_language,
       content: fileContent,
